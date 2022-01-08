@@ -11,7 +11,7 @@ import fs from 'fs';
 import { BN, Program, web3 } from '@project-serum/anchor';
 
 import { loadCache, saveCache } from '../helpers/cache';
-import { arweaveUpload } from '../helpers/upload/arweave';
+import { arweaveMetaUpload, arweaveUpload } from '../helpers/upload/arweave';
 import { makeArweaveBundleUploadGenerator } from '../helpers/upload/arweave-bundle';
 import { awsUpload } from '../helpers/upload/aws';
 import { ipfsCreds, ipfsUpload } from '../helpers/upload/ipfs';
@@ -20,7 +20,7 @@ import { StorageType } from '../helpers/storage-type';
 import { AssetKey } from '../types';
 import { chunks } from '../helpers/various';
 
-export async function uploadV2({
+export async function uploadMetaV2({
   files,
   cacheName,
   env,
@@ -311,21 +311,19 @@ export async function uploadV2({
                     break;
                   case StorageType.Arweave:
                   default:
-                    [link, imageLink] = await arweaveUpload(
+                    [link] = await arweaveMetaUpload(
                       walletKeyPair,
                       anchorProgram,
                       env,
-                      image,
                       manifestBuffer,
                       manifest,
                       assetKey.index,
                     );
                 }
-                if (link && imageLink) {
+                if (link) {
                   log.debug('Updating cache for ', allIndexesInSlice[i]);
                   cacheContent.items[assetKey.index] = {
                     link,
-                    imageLink,
                     name: manifest.name,
                     onChain: false,
                   };
@@ -451,7 +449,7 @@ type Manifest = {
  * Assets which should be uploaded either are not present in the Cache object,
  * or do not truthy value for the `link` property.
  */
-export function getAssetKeysNeedingUpload(
+function getAssetKeysNeedingUpload(
   items: Cache['items'],
   files: string[],
 ): AssetKey[] {
@@ -460,10 +458,8 @@ export function getAssetKeysNeedingUpload(
     ...files.map(filePath => path.basename(filePath)),
   ]);
   const all = Array.from(set);
-  console.log(all);
   const keyMap = {};
   return all
-    .filter(k => !k.includes('.json'))
     .reduce((acc, assetKey) => {
       const ext = path.extname(assetKey);
       const key = path.basename(assetKey, ext);
@@ -653,6 +649,8 @@ export async function upload({
   // Compile a sorted list of assets which need to be uploaded.
   const dedupedAssetKeys = getAssetKeysNeedingUpload(cache.items, files);
 
+  console.log({ dedupedAssetKeys });
+
   // Initialize variables that might be needed for uploded depending on storage
   // type.
   // These will be needed anyway either to initialize the
@@ -732,6 +730,7 @@ export async function upload({
               try {
                 switch (storage) {
                   case StorageType.Ipfs:
+                    throw 'Not suppported';
                     [link, imageLink] = await ipfsUpload(
                       ipfsCredentials,
                       image,
@@ -739,6 +738,7 @@ export async function upload({
                     );
                     break;
                   case StorageType.Aws:
+                    throw 'Not suppported';
                     [link, imageLink] = await awsUpload(
                       awsS3Bucket,
                       image,
@@ -747,21 +747,19 @@ export async function upload({
                     break;
                   case StorageType.Arweave:
                   default:
-                    [link, imageLink] = await arweaveUpload(
+                    [link] = await arweaveMetaUpload(
                       walletKeyPair,
                       anchorProgram,
                       env,
-                      image,
                       manifestBuffer,
                       manifest,
                       i,
                     );
                 }
-                if (link && imageLink) {
+                if (link) {
                   log.debug('Updating cache for ', assetKey);
                   cache.items[assetKey.index] = {
                     link,
-                    imageLink,
                     name: manifest.name,
                     onChain: false,
                   };

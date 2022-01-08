@@ -47,7 +47,7 @@ const supportedImageTypes = {
   'image/gif': 1,
   'image/jpeg': 1,
 };
-program.version('0.0.2');
+program.version('1.0.0');
 
 if (!fs.existsSync(CACHE_PATH)) {
   fs.mkdirSync(CACHE_PATH);

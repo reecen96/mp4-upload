@@ -122,3 +122,67 @@ export async function arweaveUpload(
     throw new Error(`No transaction ID for upload: ${index}`);
   }
 }
+
+export async function arweaveMetaUpload(
+  walletKeyPair,
+  anchorProgram,
+  env,
+  manifestBuffer, // TODO rename metadataBuffer
+  manifest, // TODO rename metadata
+  index,
+) {
+  // const imageExt = path.extname(image);
+  // const fsStat = await stat(image);
+  const estimatedManifestSize = estimateManifestSize(['metadata.json']);
+  const storageCost = await fetchAssetCostToStore([
+    manifestBuffer.length,
+    estimatedManifestSize,
+  ]);
+  log.debug(`lamport cost to store file: ${storageCost}`);
+
+  const instructions = [
+    anchor.web3.SystemProgram.transfer({
+      fromPubkey: walletKeyPair.publicKey,
+      toPubkey: ARWEAVE_PAYMENT_WALLET,
+      lamports: storageCost,
+    }),
+  ];
+
+  const tx = await sendTransactionWithRetryWithKeypair(
+    anchorProgram.provider.connection,
+    walletKeyPair,
+    instructions,
+    [],
+    'confirmed',
+  );
+  log.debug(`solana transaction (${env}) for arweave payment:`, tx);
+
+  const data = new FormData();
+  data.append('transaction', tx['txid']);
+  data.append('env', env);
+  // data.append('file[]', fs.createReadStream(image), {
+  //   filename: `${index}${imageExt}`,
+  //   contentType: `image/${imageExt.replace('.', '')}`,
+  // });
+  data.append('file[]', manifestBuffer, 'metadata.json');
+
+  const result = await upload(data, manifest, index);
+
+  const metadataFile = result.messages?.find(
+    m => m.filename === 'manifest.json',
+  );
+  // const imageFile = result.messages?.find(
+  //   m => m.filename === `${index}${imageExt}`,
+  // );
+  if (metadataFile?.transactionId) {
+    const link = `https://arweave.net/${metadataFile.transactionId}`;
+    // const imageLink = `https://arweave.net/${
+    //   imageFile.transactionId
+    // }?ext=${imageExt.replace('.', '')}`;
+    log.debug(`File uploaded: ${link}`);
+    return [link];
+  } else {
+    // @todo improve
+    throw new Error(`No transaction ID for upload: ${index}`);
+  }
+}
