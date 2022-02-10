@@ -43,13 +43,18 @@ import { createGenerativeArt } from './commands/createArt';
 import { withdrawV2 } from './commands/withdraw';
 import { updateFromCache } from './commands/updateFromCache';
 import { StorageType } from './helpers/storage-type';
-import { getType } from 'mime';
+const { getType } = require('mime');
+
 import { uploadMetaV2 } from './commands/uploadMeta';
+import { uploadVideoV2 } from './commands/uploadVideo';
 program.version('2.0.0');
 const supportedImageTypes = {
   'image/png': 1,
   'image/gif': 1,
   'image/jpeg': 1,
+};
+const supportedVideoTypes = {
+  'video/mp4': 1,
 };
 
 if (!fs.existsSync(CACHE_PATH)) {
@@ -183,6 +188,171 @@ programCommand('upload')
     log.info('started at: ' + startMs.toString());
     try {
       await uploadV2({
+        files: supportedFiles,
+        cacheName,
+        env,
+        totalNFTs: elemCount,
+        gatekeeper,
+        storage,
+        retainAuthority,
+        mutable,
+        ipfsCredentials,
+        awsS3Bucket,
+        batchSize,
+        price,
+        treasuryWallet,
+        anchorProgram,
+        walletKeyPair,
+        splToken,
+        endSettings,
+        hiddenSettings,
+        whitelistMintSettings,
+        goLiveDate,
+        uuid,
+        arweaveJwk,
+      });
+    } catch (err) {
+      log.warn('upload was not successful, please re-run.', err);
+      process.exit(1);
+    }
+    const endMs = Date.now();
+    const timeTaken = new Date(endMs - startMs).toISOString().substr(11, 8);
+    log.info(
+      `ended at: ${new Date(endMs).toISOString()}. time taken: ${timeTaken}`,
+    );
+    process.exit(0);
+  });
+
+programCommand('upload_video')
+  .argument(
+    '<directory>',
+    'Directory containing images named from 0-n',
+    val => {
+      return fs.readdirSync(`${val}`).map(file => path.join(val, file));
+    },
+  )
+  .requiredOption(
+    '-cp, --config-path <string>',
+    'JSON file with candy machine settings',
+  )
+  .option(
+    '-r, --rpc-url <string>',
+    'custom rpc url since this is a heavy command',
+  )
+  .action(async (files: string[], options, cmd) => {
+    const { keypair, env, cacheName, configPath, rpcUrl } = cmd.opts();
+
+    const walletKeyPair = loadWalletKey(keypair);
+    const anchorProgram = await loadCandyProgramV2(walletKeyPair, env, rpcUrl);
+
+    const {
+      storage,
+      ipfsInfuraProjectId,
+      number,
+      ipfsInfuraSecret,
+      arweaveJwk,
+      awsS3Bucket,
+      retainAuthority,
+      mutable,
+      batchSize,
+      price,
+      splToken,
+      treasuryWallet,
+      gatekeeper,
+      endSettings,
+      hiddenSettings,
+      whitelistMintSettings,
+      goLiveDate,
+      uuid,
+    } = await getCandyMachineV2Config(walletKeyPair, anchorProgram, configPath);
+
+    if (storage === StorageType.ArweaveSol && env !== 'mainnet-beta') {
+      throw new Error(
+        'The arweave-sol storage option only works on mainnet. For devnet, please use either arweave, aws or ipfs\n',
+      );
+    }
+
+    if (storage === StorageType.ArweaveBundle && env !== 'mainnet-beta') {
+      throw new Error(
+        'The arweave-bundle storage option only works on mainnet because it requires spending real AR tokens. For devnet, please set the --storage option to "aws" or "ipfs"\n',
+      );
+    }
+
+    if (storage === StorageType.Arweave) {
+      log.warn(
+        'WARNING: The "arweave" storage option will be going away soon. Please migrate to arweave-bundle or arweave-sol for mainnet.\n',
+      );
+    }
+
+    if (storage === StorageType.ArweaveBundle && !arweaveJwk) {
+      throw new Error(
+        'Path to Arweave JWK wallet file (--arweave-jwk) must be provided when using arweave-bundle',
+      );
+    }
+    if (
+      storage === StorageType.Ipfs &&
+      (!ipfsInfuraProjectId || !ipfsInfuraSecret)
+    ) {
+      throw new Error(
+        'IPFS selected as storage option but Infura project id or secret key were not provided.',
+      );
+    }
+    if (storage === StorageType.Aws && !awsS3Bucket) {
+      throw new Error(
+        'aws selected as storage option but existing bucket name (--aws-s3-bucket) not provided.',
+      );
+    }
+    if (!Object.values(StorageType).includes(storage)) {
+      throw new Error(
+        `Storage option must either be ${Object.values(StorageType).join(
+          ', ',
+        )}. Got: ${storage}`,
+      );
+    }
+    const ipfsCredentials = {
+      projectId: ipfsInfuraProjectId,
+      secretKey: ipfsInfuraSecret,
+    };
+
+    let imageFileCount = 0;
+    let jsonFileCount = 0;
+    let videoFileCount = 0;
+
+    // Filter out any non-supported file types and find the JSON vs Image file count
+    const supportedFiles = files.filter(it => {
+      if (supportedImageTypes[getType(it)]) {
+        imageFileCount++;
+      } else if (supportedVideoTypes[getType(it)]) {
+        videoFileCount++;
+      } else if (it.endsWith(EXTENSION_JSON)) {
+        jsonFileCount++;
+      } else {
+        log.warn(`WARNING: Skipping unsupported file type ${it}`);
+        return false;
+      }
+
+      return true;
+    });
+
+    if (imageFileCount !== jsonFileCount || videoFileCount !== jsonFileCount) {
+      throw new Error(
+        `number of img files (${imageFileCount}) or number of vid files (${videoFileCount}) is different than the number of json files (${jsonFileCount})`,
+      );
+    }
+
+    const elemCount = number ? number : imageFileCount;
+    if (elemCount < imageFileCount) {
+      throw new Error(
+        `max number (${elemCount}) cannot be smaller than the number of elements in the source folder (${imageFileCount})`,
+      );
+    }
+
+    log.info(`Beginning the upload for ${elemCount} (img+vid+json) pairs`);
+
+    const startMs = Date.now();
+    log.info('started at: ' + startMs.toString());
+    try {
+      await uploadVideoV2({
         files: supportedFiles,
         cacheName,
         env,

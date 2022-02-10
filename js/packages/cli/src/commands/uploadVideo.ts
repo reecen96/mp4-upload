@@ -20,7 +20,7 @@ import { StorageType } from '../helpers/storage-type';
 import { AssetKey } from '../types';
 import { chunks } from '../helpers/various';
 
-export async function uploadV2({
+export async function uploadVideoV2({
   files,
   cacheName,
   env,
@@ -48,7 +48,7 @@ export async function uploadV2({
   cacheName: string;
   env: string;
   totalNFTs: number;
-  storage: string;
+  storage: StorageType;
   retainAuthority: boolean;
   mutable: boolean;
   ipfsCredentials: ipfsCreds;
@@ -92,8 +92,10 @@ export async function uploadV2({
   }
 
   const dedupedAssetKeys = getAssetKeysNeedingUpload(cacheContent.items, files);
+
   const SIZE = dedupedAssetKeys.length;
-  console.log('Size', SIZE, dedupedAssetKeys[0]);
+  // console.log('Size', SIZE, dedupedAssetKeys[0]);
+  console.log(SIZE, { dedupedAssetKeys });
   let candyMachine = cacheContent.program.candyMachine
     ? new PublicKey(cacheContent.program.candyMachine)
     : undefined;
@@ -181,6 +183,7 @@ export async function uploadV2({
           ? JSON.parse((await readFile(arweaveJwk)).toString())
           : undefined,
         storage === StorageType.ArweaveSol ? walletKeyPair : undefined,
+        true,
       );
 
       let result = arweaveBundleUploadGenerator.next();
@@ -201,6 +204,8 @@ export async function uploadV2({
       }
       log.info('Upload done.');
     } else {
+      console.log('Arweave');
+      // arweave
       await Promise.all(
         chunks(Array.from(Array(SIZE).keys()), batchSize || 50).map(
           async allIndexesInSlice => {
@@ -210,6 +215,7 @@ export async function uploadV2({
                 dirname,
                 `${assetKey.index}${assetKey.mediaExt}`,
               );
+              const video = path.join(dirname, `${assetKey.index}.mp4`);
               const manifest = getAssetManifest(
                 dirname,
                 assetKey.index.includes('json')
@@ -316,7 +322,7 @@ export async function uploadV2({
                       anchorProgram,
                       env,
                       image,
-                      undefined,
+                      video,
                       manifestBuffer,
                       manifest,
                       assetKey.index,
@@ -462,15 +468,15 @@ export function getAssetKeysNeedingUpload(
   ]);
   const all = Array.from(set);
   console.log(all);
-  const keyMap = {};
+  // const keyMap = {};
   return all
-    .filter(k => !k.includes('.json'))
+    .filter(k => !k.includes('.json') && !k.includes('.mp4'))
     .reduce((acc, assetKey) => {
       const ext = path.extname(assetKey);
       const key = path.basename(assetKey, ext);
 
-      if (!items[key]?.link && !keyMap[key]) {
-        keyMap[key] = true;
+      if (!items[key]?.link) {
+        // keyMap[key] = true;
         acc.push({ mediaExt: ext, index: key });
       }
       return acc;
@@ -616,178 +622,3 @@ type UploadParams = {
   arweaveJwk: string;
   batchSize: number;
 };
-export async function upload({
-  files,
-  cacheName,
-  env,
-  keypair,
-  storage,
-  rpcUrl,
-  ipfsCredentials,
-  awsS3Bucket,
-  arweaveJwk,
-  batchSize,
-}: UploadParams): Promise<void> {
-  // Read the content of the Cache file into the Cache object, initialize it
-  // otherwise.
-  const cache: Cache | undefined = loadCache(cacheName, env);
-  if (cache === undefined) {
-    log.error(
-      'Existing cache not found. To create a new candy machine, please use candy machine v2.',
-    );
-    throw new Error('Existing cache not found');
-  }
-
-  // Make sure config exists in cache
-  if (!cache.program?.config) {
-    log.error(
-      'existing config account not found in cache. To create a new candy machine, please use candy machine v2.',
-    );
-    throw new Error('config account not found in cache');
-  }
-  const config = new PublicKey(cache.program.config);
-
-  cache.items = cache.items || {};
-
-  // Retrieve the directory path where the assets are located.
-  const dirname = path.dirname(files[0]);
-  // Compile a sorted list of assets which need to be uploaded.
-  const dedupedAssetKeys = getAssetKeysNeedingUpload(cache.items, files);
-
-  // Initialize variables that might be needed for uploded depending on storage
-  // type.
-  // These will be needed anyway either to initialize the
-  // Candy Machine Custom Program configuration, or to write the assets
-  // to the deployed configuration on chain.
-  const walletKeyPair = loadWalletKey(keypair);
-  const anchorProgram = await loadCandyProgram(walletKeyPair, env, rpcUrl);
-  // Some assets need to be uploaded.
-  if (dedupedAssetKeys.length) {
-    // Arweave Native storage leverages Arweave Bundles.
-    // It allows to ncapsulate multiple independent data transactions
-    // into a single top level transaction,
-    // which pays the reward for all bundled data.
-    // https://github.com/Bundlr-Network/arbundles
-    // Each bundle consists of one or multiple asset filepair (PNG + JSON).
-    if (
-      storage === StorageType.ArweaveBundle ||
-      storage === StorageType.ArweaveSol
-    ) {
-      // Initialize the Arweave Bundle Upload Generator.
-      // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Generator
-      const arweaveBundleUploadGenerator = makeArweaveBundleUploadGenerator(
-        storage,
-        dirname,
-        dedupedAssetKeys,
-        storage === StorageType.ArweaveBundle
-          ? JSON.parse((await readFile(arweaveJwk)).toString())
-          : undefined,
-        storage === StorageType.ArweaveSol ? walletKeyPair : undefined,
-      );
-
-      let result = arweaveBundleUploadGenerator.next();
-      // Loop over every uploaded bundle of asset filepairs (PNG + JSON)
-      // and save the results to the Cache object, persist it to the Cache file.
-      while (!result.done) {
-        const { cacheKeys, arweavePathManifestLinks, updatedManifests } =
-          await result.value;
-        updateCacheAfterUpload(
-          cache,
-          cacheKeys,
-          arweavePathManifestLinks,
-          updatedManifests,
-        );
-        saveCache(cacheName, env, cache);
-        log.info('Saved bundle upload result to cache.');
-        result = arweaveBundleUploadGenerator.next();
-      }
-      log.info('Upload done.');
-    } else {
-      // For other storage methods, we upload the files individually.
-      const SIZE = dedupedAssetKeys.length;
-      const tick = SIZE / 100; // print every one percent
-      let lastPrinted = 0;
-
-      await Promise.all(
-        chunks(Array.from(Array(SIZE).keys()), batchSize || 50).map(
-          async allIndexesInSlice => {
-            for (let i = 0; i < allIndexesInSlice.length; i++) {
-              const assetKey = dedupedAssetKeys[i];
-              const image = path.join(
-                dirname,
-                `${assetKey.index}${assetKey.mediaExt}`,
-              );
-              const manifest = getAssetManifest(
-                dirname,
-                assetKey.index.includes('json')
-                  ? assetKey.index
-                  : `${assetKey.index}.json`,
-              );
-              const manifestBuffer = Buffer.from(JSON.stringify(manifest));
-              if (i >= lastPrinted + tick || i === 0) {
-                lastPrinted = i;
-                log.info(`Processing asset: ${assetKey}`);
-              }
-
-              let link, imageLink;
-              try {
-                switch (storage) {
-                  case StorageType.Ipfs:
-                    [link, imageLink] = await ipfsUpload(
-                      ipfsCredentials,
-                      image,
-                      manifestBuffer,
-                    );
-                    break;
-                  case StorageType.Aws:
-                    [link, imageLink] = await awsUpload(
-                      awsS3Bucket,
-                      image,
-                      manifestBuffer,
-                    );
-                    break;
-                  case StorageType.Arweave:
-                  default:
-                    [link, imageLink] = await arweaveUpload(
-                      walletKeyPair,
-                      anchorProgram,
-                      env,
-                      image,
-                      undefined,
-                      manifestBuffer,
-                      manifest,
-                      i,
-                    );
-                }
-                if (link && imageLink) {
-                  log.debug('Updating cache for ', assetKey);
-                  cache.items[assetKey.index] = {
-                    link,
-                    imageLink,
-                    name: manifest.name,
-                    onChain: false,
-                  };
-                  saveCache(cacheName, env, cache);
-                }
-              } catch (err) {
-                log.error(`Error uploading file ${assetKey}`, err);
-                throw err;
-              }
-            }
-          },
-        ),
-      );
-    }
-
-    setAuthority(walletKeyPair.publicKey, cache, cacheName, env);
-
-    return writeIndices({
-      anchorProgram,
-      cache,
-      cacheName,
-      env,
-      config,
-      walletKeyPair,
-    });
-  }
-}

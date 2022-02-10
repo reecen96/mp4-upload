@@ -7,12 +7,13 @@ import { ArweaveSigner, Signer } from 'arbundles/src/signing';
 import log from 'loglevel';
 import { StorageType } from '../storage-type';
 import { Keypair } from '@solana/web3.js';
-import { getType, getExtension } from 'mime';
+const { getType, getExtension } = require('mime');
 import { AssetKey } from '../../types';
 import Transaction from 'arweave/node/lib/transaction';
 import Bundlr from '@bundlr-network/client';
 
 import BundlrTransaction from '@bundlr-network/client/build/src/transaction';
+import { find } from 'lodash';
 
 export const LAMPORTS = 1_000_000_000;
 /**
@@ -46,11 +47,7 @@ type ProcessFileArgs = {
   signer: ArweaveSigner;
   storageType: StorageType;
   bundlr: Bundlr;
-  filePair: {
-    key: string;
-    image: string;
-    manifest: string;
-  };
+  filePair: FilePair;
 };
 
 /**
@@ -60,6 +57,7 @@ type ProcessFileArgs = {
  */
 type Manifest = {
   image: string;
+  animation_url?: string;
   properties: {
     files: Array<{ type: string; uri: string }>;
   };
@@ -162,6 +160,34 @@ function createArweavePathManifest(
   return arweavePathManifest;
 }
 
+function createArweavePathManifestVideo(
+  imageTxId: string,
+  manifestTxId: string,
+  mediaType: string,
+  videoTxId: string,
+): ArweavePathManifest {
+  const arweavePathManifest: ArweavePathManifest = {
+    manifest: 'arweave/paths',
+    version: '0.1.0',
+    paths: {
+      [`image${mediaType}`]: {
+        id: imageTxId,
+      },
+      [`video.mp4`]: {
+        id: videoTxId,
+      },
+      'metadata.json': {
+        id: manifestTxId,
+      },
+    },
+    index: {
+      path: 'metadata.json',
+    },
+  };
+
+  return arweavePathManifest;
+}
+
 // The size in bytes of a dummy Arweave Path Manifest.
 // Used to account for the size of a file pair manifest, in the computation
 // of a bundle range.
@@ -188,6 +214,7 @@ const dummyAreaveManifestByteSize = (() => {
 type FilePair = {
   key: string;
   image: string;
+  video?: string;
   manifest: string;
 };
 
@@ -211,11 +238,14 @@ type BundleRange = {
 async function getBundleRange(
   filePairs: FilePair[],
   splitSize: boolean = false,
+  withVideo: boolean,
 ): Promise<BundleRange> {
   let total = 0;
   let count = 0;
-  for (const { key, image, manifest } of filePairs) {
-    const filePairSize = await [image, manifest].reduce(async (accP, file) => {
+  for (const { key, image, video, manifest } of filePairs) {
+    const files: string[] = [image, video, manifest];
+    if (withVideo) files.push(video);
+    const filePairSize = await files.reduce(async (accP, file) => {
       const acc = await accP;
       const { size } = await stat(file);
       return acc + size;
@@ -292,12 +322,23 @@ async function getUpdatedManifest(
   manifestPath: string,
   imageLink: string,
   contentType: string,
+  videoLink?: string,
 ): Promise<Manifest> {
   const manifest: Manifest = JSON.parse(
     (await readFile(manifestPath)).toString(),
   );
   manifest.image = imageLink;
   manifest.properties.files = [{ type: contentType, uri: imageLink }];
+
+  if (videoLink) {
+    manifest.animation_url = videoLink;
+    manifest.properties.files.push({ type: 'video/mp4', uri: videoLink });
+  }
+
+  console.log(manifestPath, {
+    image: manifest.image,
+    animation_url: manifest.animation_url,
+  });
 
   return manifest;
 }
@@ -384,6 +425,102 @@ async function processFiles({
 }
 
 /**
+ * Fetches the corresponding filepair and creates a data item if arweave bundle
+ * or creates a bundlr transaction if arweave sol, to basically avoid clashing
+ * between data item's id
+ */
+async function processFilesVideo({
+  signer,
+  filePair,
+  bundlr,
+  storageType,
+}: ProcessFileArgs) {
+  const contentType = getType(filePair.image);
+  const imageBuffer = await readFile(filePair.image);
+  const videoBuffer = await readFile(filePair.video);
+  let imageDataItem: BundlrTransaction | DataItem;
+  let videoDataItem: BundlrTransaction | DataItem;
+  let manifestDataItem: BundlrTransaction | DataItem;
+  let arweavePathManifestDataItem: BundlrTransaction | DataItem;
+
+  if (storageType === StorageType.ArweaveSol) {
+    imageDataItem = bundlr.createTransaction(imageBuffer, {
+      tags: imageTags.concat({
+        name: 'Content-Type',
+        value: contentType,
+      }),
+    });
+    videoDataItem = bundlr.createTransaction(videoBuffer, {
+      tags: [
+        {
+          name: 'Content-Type',
+          value: 'video/mp4',
+        },
+      ],
+    });
+
+    await (imageDataItem as BundlrTransaction).sign();
+    await (videoDataItem as BundlrTransaction).sign();
+  } else if (storageType === StorageType.ArweaveBundle) {
+    imageDataItem = await getImageDataItem(signer, imageBuffer, contentType);
+
+    await (imageDataItem as DataItem).sign(signer);
+  }
+
+  const imageLink = `https://arweave.net/${imageDataItem.id}`;
+  const videoLink = `https://arweave.net/${videoDataItem.id}`;
+
+  const manifest = await getUpdatedManifest(
+    filePair.manifest,
+    imageLink,
+    contentType,
+    videoLink,
+  );
+
+  if (storageType === StorageType.ArweaveSol) {
+    manifestDataItem = bundlr.createTransaction(JSON.stringify(manifest), {
+      tags: manifestTags,
+    });
+
+    await (manifestDataItem as BundlrTransaction).sign();
+  } else if (storageType === StorageType.ArweaveBundle) {
+    manifestDataItem = getManifestDataItem(signer, manifest);
+    await (manifestDataItem as DataItem).sign(signer);
+  }
+
+  const arweavePathManifest = createArweavePathManifestVideo(
+    imageDataItem.id,
+    manifestDataItem.id,
+    `.${getExtension(contentType)}`,
+    videoDataItem.id,
+  );
+
+  if (storageType === StorageType.ArweaveSol) {
+    arweavePathManifestDataItem = bundlr.createTransaction(
+      JSON.stringify(arweavePathManifest),
+      { tags: arweavePathManifestTags },
+    );
+
+    await (arweavePathManifestDataItem as BundlrTransaction).sign();
+    await arweavePathManifestDataItem.sign(signer);
+  } else if (storageType === StorageType.ArweaveBundle) {
+    arweavePathManifestDataItem = getArweavePathManifestDataItem(
+      signer,
+      arweavePathManifest,
+    );
+    await (arweavePathManifestDataItem as DataItem).sign(signer);
+  }
+
+  return {
+    imageDataItem,
+    videoDataItem,
+    manifestDataItem,
+    arweavePathManifestDataItem,
+    manifest,
+  };
+}
+
+/**
  * Initialize the Arweave Bundle Upload Generator.
  * Returns a Generator function that allows to trigger an asynchronous bundle
  * upload to Arweave when calling generator.next().
@@ -397,6 +534,7 @@ export function* makeArweaveBundleUploadGenerator(
   assets: AssetKey[],
   jwk?: any,
   walletKeyPair?: Keypair,
+  video?: true | undefined,
 ): Generator<Promise<UploadGeneratorResult>> {
   let signer: ArweaveSigner;
   const storageType: StorageType = storage;
@@ -415,6 +553,8 @@ export function* makeArweaveBundleUploadGenerator(
     signer = new signers.ArweaveSigner(jwk);
   }
 
+  console.log('uploading', { assets });
+
   const arweave = getArweave();
   const bundlr =
     storageType === StorageType.ArweaveSol
@@ -425,9 +565,10 @@ export function* makeArweaveBundleUploadGenerator(
         )
       : undefined;
 
-  const filePairs = assets.map((asset: AssetKey) => ({
+  const filePairs: FilePair[] = assets.map((asset: AssetKey) => ({
     key: asset.index,
     image: path.join(dirname, `${asset.index}${asset.mediaExt}`),
+    video: path.join(dirname, `${asset.index}.mp4`),
     manifest: path.join(dirname, `${asset.index}.json`),
   }));
 
@@ -445,6 +586,7 @@ export function* makeArweaveBundleUploadGenerator(
     const result = getBundleRange(
       filePairs,
       storage === StorageType.ArweaveSol ? true : false,
+      video,
     ).then(async function processBundle({ count, size }) {
       log.info(
         `Computed Bundle range, including ${count} file pair(s) totaling ${sizeMB(
@@ -471,12 +613,16 @@ export function* makeArweaveBundleUploadGenerator(
           const acc = await accP;
           log.debug('Processing File Pair', filePair.key);
 
+          const result: any = video
+            ? await processFilesVideo({ storageType, signer, bundlr, filePair })
+            : await processFiles({ storageType, signer, bundlr, filePair });
+
           const {
             imageDataItem,
             manifestDataItem,
             arweavePathManifestDataItem,
             manifest,
-          } = await processFiles({ storageType, signer, bundlr, filePair });
+          } = result;
 
           const arweavePathManifestLink = `https://arweave.net/${manifestDataItem.id}`;
 
@@ -486,10 +632,11 @@ export function* makeArweaveBundleUploadGenerator(
             manifestDataItem,
             arweavePathManifestDataItem,
           );
+          if (video) acc.dataItems.push(result.videoDataItem);
           acc.arweavePathManifestLinks.push(arweavePathManifestLink);
           acc.updatedManifests.push(manifest);
 
-          log.debug('Processed File Pair', filePair.key);
+          log.debug('Processed File Pair with video', filePair.key);
           return acc;
         },
         Promise.resolve({

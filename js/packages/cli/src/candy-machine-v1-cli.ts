@@ -41,7 +41,7 @@ import {
 import log from 'loglevel';
 import { withdraw } from './commands/withdraw';
 import { StorageType } from './helpers/storage-type';
-import { getType } from 'mime';
+const { getType } = require('mime');
 const supportedImageTypes = {
   'image/png': 1,
   'image/gif': 1,

@@ -59,22 +59,29 @@ export async function arweaveUpload(
   anchorProgram,
   env,
   image,
+  video: string | undefined,
   manifestBuffer, // TODO rename metadataBuffer
   manifest, // TODO rename metadata
   index,
 ) {
   const imageExt = path.extname(image);
   const fsStat = await stat(image);
-  const estimatedManifestSize = estimateManifestSize([
-    `${index}${imageExt}`,
-    'metadata.json',
-  ]);
+
+
+  video = undefined;
+  const estimatedManifestSize = video
+    ? estimateManifestSize([
+        `${index}${imageExt}`,
+        `${index}.mp4`,
+        'metadata.json',
+      ])
+    : estimateManifestSize([`${index}${imageExt}`, 'metadata.json']);
   const storageCost = await fetchAssetCostToStore([
     fsStat.size,
     manifestBuffer.length,
     estimatedManifestSize,
   ]);
-  log.debug(`lamport cost to store ${image}: ${storageCost}`);
+  log.debug(`lamport cost to store ${index}: ${storageCost}`);
 
   const instructions = [
     anchor.web3.SystemProgram.transfer({
@@ -100,9 +107,22 @@ export async function arweaveUpload(
     filename: `${index}${imageExt}`,
     contentType: `image/${imageExt.replace('.', '')}`,
   });
+  // if (video)
+  //   data.append('file[]', fs.createReadStream(video), {
+  //     filename: `${index}.mp4`,
+  //     contentType: `video/mp4`,
+  //   });
   data.append('file[]', manifestBuffer, 'metadata.json');
 
+  console.log('Uploading...', { image, video });
+
   const result = await upload(data, manifest, index);
+
+  console.log(index, `messages(${result.messages.length}):`);
+
+  result.messages.forEach(msg => {
+    console.log(JSON.stringify({ msg }));
+  });
 
   const metadataFile = result.messages?.find(
     m => m.filename === 'manifest.json',
@@ -110,6 +130,10 @@ export async function arweaveUpload(
   const imageFile = result.messages?.find(
     m => m.filename === `${index}${imageExt}`,
   );
+
+  console.log({ metadataFile, imageFile });
+
+  throw 'stop';
   if (metadataFile?.transactionId) {
     const link = `https://arweave.net/${metadataFile.transactionId}`;
     const imageLink = `https://arweave.net/${

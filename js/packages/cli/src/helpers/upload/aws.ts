@@ -4,7 +4,7 @@ import { createReadStream } from 'fs';
 import { Readable } from 'form-data';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import path from 'path';
-import { getType } from 'mime';
+const { getType } = require('mime');
 
 async function uploadFile(
   s3Client: S3Client,
